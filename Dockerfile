@@ -1,16 +1,23 @@
-FROM ubuntu:18.04
+FROM golang:1.21-bullseye as permset
+WORKDIR /src
+RUN git clone https://github.com/jacobalberty/permset.git /src && \
+    mkdir -p /out && \
+    go build -ldflags "-X main.chownDir=/unifi" -o /out/permset
+
+FROM ubuntu:20.04
 
 LABEL maintainer="Jacob Alberty <jacob.alberty@foundigital.com>"
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-ARG PKGURL=https://dl.ui.com/unifi/6.1.71/unifi_sysvinit_all.deb
+ARG PKGURL=https://dl.ui.com/unifi/7.5.174/unifi_sysvinit_all.deb
 
 ENV BASEDIR=/usr/lib/unifi \
     DATADIR=/unifi/data \
     LOGDIR=/unifi/log \
     CERTDIR=/unifi/cert \
-    RUNDIR=/var/run/unifi \
+    RUNDIR=/unifi/run \
+    ORUNDIR=/var/run/unifi \
     ODATADIR=/var/lib/unifi \
     OLOGDIR=/var/log/unifi \
     CERTNAME=cert.pem \
@@ -26,32 +33,10 @@ ENV BASEDIR=/usr/lib/unifi \
 # https://github.com/tianon/gosu/blob/master/INSTALL.md
 # This should be integrated with the main run because it duplicates a lot of the steps there
 # but for now while shoehorning gosu in it is seperate
-RUN set -ex \
-    && fetchDeps=' \
-        ca-certificates \
-        dirmngr \
-        gpg \
-        wget \
-    ' \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends $fetchDeps \
-    && dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')" \
-    && wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch" \
-    && wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc" \
-# verify the signature
-    && export GNUPGHOME="$(mktemp -d)" \
-    && for server in $(shuf -e ha.pool.sks-keyservers.net \
-                            hkp://p80.pool.sks-keyservers.net:80 \
-                            keyserver.ubuntu.com \
-                            hkp://keyserver.ubuntu.com:80 \
-                            pool.sks-keyservers.net) ; do \
-        gpg --keyserver "$server" --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4 && break || : ; \
-    done \
-    && gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu \
-    && rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc \
-    && chmod +x /usr/local/bin/gosu \
-    && apt-get purge -y --auto-remove $fetchDeps \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y gosu; \
+	rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /usr/unifi \
      /usr/local/unifi/init.d \
@@ -76,11 +61,20 @@ RUN set -ex \
  && useradd --no-log-init -r -u $UNIFI_UID -g $UNIFI_GID unifi \
  && /usr/local/bin/docker-build.sh "${PKGURL}"
 
+COPY --from=permset /out/permset /usr/local/bin/permset
+RUN chown 0.0 /usr/local/bin/permset && \
+    chmod +s /usr/local/bin/permset
+
 RUN mkdir -p /unifi && chown unifi:unifi -R /unifi
+
+# Apply any hotfixes that were included
+COPY hotfixes /usr/local/unifi/hotfixes
+
+RUN chmod +x /usr/local/unifi/hotfixes/* && run-parts /usr/local/unifi/hotfixes
 
 VOLUME ["/unifi", "${RUNDIR}"]
 
-EXPOSE 6789/tcp 8080/tcp 8443/tcp 8880/tcp 8843/tcp 3478/udp
+EXPOSE 6789/tcp 8080/tcp 8443/tcp 8880/tcp 8843/tcp 3478/udp 10001/udp
 
 WORKDIR /unifi
 
